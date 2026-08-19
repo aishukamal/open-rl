@@ -68,8 +68,9 @@ if is_fft_enabled():
   from accel_timeslicer.time_slicer import time_slicer_client_from_env, workload_from_env
   from accel_timeslicer.workload import SAMPLER_TIME_SLICE_GROUP, workload_job_id
 
-  # In llmd-app mode this returns the TimeSlice Orchestrator adapter; the
-  # legacy accel-timeslicer client otherwise. Same acquire/release surface.
+  # In llmd-app mode (the default) this returns the TimeSlice Orchestrator
+  # adapter; in mode "off" it returns the no-op client and the worker manages
+  # its own offload inline. Same acquire/release surface either way.
   LLMD_APP_MODE = is_llmd_app_mode()
   time_slicer = time_slicer_client_from_env()
 

@@ -71,6 +71,18 @@ class FFTTrainingWorker(BaseTrainerWorker):
     # drives sleep()/wake_up(); saves may then legally run while resident
     # because the orchestrator defers the snapshot on the zero-overhead path.
     self.external_offload_manager: bool = False
+    # Deadlock invariants for this lock (verified):
+    # 1. No RPC is ever made while holding it — the decorated bodies
+    #    (sleep/wake_up/save_*) do only torch copies and local file I/O;
+    #    orchestrator acquire/release and app_channel registration run
+    #    lock-free on other call paths.
+    # 2. It is never taken on the asyncio event-loop thread: every locked
+    #    method is synchronous and reached via asyncio.to_thread (request
+    #    loop) or the Snapshot Agent stream thread (pushed callbacks), so no
+    #    coroutine can await while the lock is held.
+    # optim_step mutates the delta-baseline shadows WITHOUT this lock; that is
+    # safe because it only runs while this job holds the group time-slice
+    # lock, and the agent never pushes a snapshot to the current lock holder.
     self._offload_lock = threading.RLock()
     self._latest_delta_tensors: dict[str, torch.Tensor] = {}
     self._latest_total_changed: int = 0

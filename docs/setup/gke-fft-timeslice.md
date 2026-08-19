@@ -25,17 +25,15 @@ the gateway process today. When the gateway receives `create_model` in FFT mode,
 on the model-specific Redis queue. It is idempotent: if the trainer worker pod
 for a model is already running, it reuses it.
 
-Third, the OpenRL accelerator time-slicer is the runtime GPU coordinator. It runs as a
-node-local DaemonSet (`open-rl-accel-timeslicer`) on GPU nodes with `hostNetwork` enabled. Trainer and
-sampler worker pods connect to the agent on their node with
-`OPEN_RL_ACCEL_TIMESLICER_HOST=status.hostIP` and
-`OPEN_RL_ACCEL_TIMESLICER_PORT=9753`. The training processor registers its
-workload identity with the agent and wraps GPU work in acquire/release calls.
-The agent keeps a FIFO queue per node-local process, allows one active workload
-at a time within that process, checkpoints on release, and restores on acquire.
-In the cluster deployment, the OpenRL time-slicer runs with `--backend llmd`;
-llm-d's physical snapshot agent performs the actual pod/PID discovery and CUDA
-checkpoint/restore.
+Third, the llm-d time-slicing platform is the runtime GPU coordinator
+(workers default to `OPEN_RL_TIME_SLICE_MODE=llmd-app`). The cluster-scoped
+TimeSlice Orchestrator keeps a FIFO lock queue per time-slice group and the
+node-local llm-d Snapshot Agent owns suspend/resume: trainer and sampler
+worker pods register their offload/reload mechanics with the agent on their
+node (`NODE_IP:9001`) over the `app_channel` stream and wrap GPU work in
+orchestrator acquire/release calls. A job's snapshot is deferred until
+another job acquires the group lock, so a sole tenant runs with zero
+snapshot overhead.
 
 The request flow is:
 
@@ -164,18 +162,12 @@ template in `05-worker-pod-template.yaml`. It stamps:
 The gateway still has a local subprocess launcher for VM development. Select the
 cluster launcher with `OPEN_RL_WORKER_MANAGER=kubernetes`.
 
-## 3. A node-local time slicer coordinates GPU windows
+## 3. The llm-d time-slicing platform coordinates GPU windows
 
-The deployment includes `07-accel-timeslicer-daemonset.yaml`, which runs one
-OpenRL accelerator time-slicer on each trainer or sampler GPU node:
-
-```yaml
-hostNetwork: true
-command: ["uv", "run", "python", "-m", "accel_timeslicer.serve"]
-args:
-  ["--listen-host", "0.0.0.0", "--port", "9753",
-   "--backend", "llmd", "--llmd-snapshot-endpoint", "127.0.0.1:9001"]
-```
+OpenRL does not run a coordinator of its own: workers default to
+`OPEN_RL_TIME_SLICE_MODE=llmd-app` and delegate to the llm-d time-slicing
+platform, which must be installed on the cluster (the cluster-scoped
+TimeSlice Orchestrator plus a Snapshot Agent on every GPU node).
 
 The dynamically launched trainer worker pods run the normal training processor:
 
@@ -185,15 +177,18 @@ command: ["uv", "run", "python", "-m", "server.training_requests_processor"]
 
 The training processor uses:
 
-- `OPEN_RL_ACCEL_TIMESLICER_HOST` from the pod's `status.hostIP`
-- `OPEN_RL_ACCEL_TIMESLICER_PORT=9753`
+- `OPEN_RL_TIME_SLICE_ORCH_ADDR` (defaults to the platform's in-cluster
+  service address) for acquire/release around each GPU work unit
+- `NODE_IP` from the pod's `status.hostIP`, so workers register their
+  offload/reload callbacks with the node-local Snapshot Agent at
+  `NODE_IP:9001` over the `app_channel` stream
 - `OPEN_RL_TIME_SLICE_JOB_ID`, aligned with the `timeslice.io/job-id` label
 - `OPEN_RL_TIME_SLICE_GROUP`, aligned with the `timeslice.io/group` label
 
-Trainer workers talk to the OpenRL coordinator on their node. OpenRL owns the
-in-memory queue and active/checkpointed state for workloads sharing the physical
-GPU. The worker pod labels provide the workload identity llm-d uses to discover
-the relevant pod and process set.
+The orchestrator owns the lock queue per time-slice group and defers each
+job's snapshot until another job acquires the lock. The worker pod labels
+provide the workload identity llm-d uses to discover the relevant pod and
+process set.
 
 ## Requirements
 
@@ -276,7 +271,7 @@ Notes:
 
 ## Setup 1.5: Install and deploy llm-d Snapshot Agent DaemonSet
 
-Because `open-rl-accel-timeslicer` runs with `--backend llmd` in cluster deployments, it delegates physical kernel-level CUDA process freezing and unfreezing (`cuda-checkpoint`) to `llmd-snapshot-agent` over gRPC on `127.0.0.1:9001`.
+In `llmd-app` mode workers register directly with the node-local `llmd-snapshot-agent` (gRPC on `NODE_IP:9001`), which owns suspend/resume of their GPU state, so a snapshot agent must run on every GPU node.
 
 To build and deploy the official `llmd-snapshot-agent` DaemonSet on GPU nodes:
 
@@ -362,12 +357,11 @@ make test e2e fft-gsm8k BASE_URL=http://127.0.0.1:8000
   claim. If only later pods are pending, check pod events for PVC attach limits,
   node selectors, taints, image pull errors, or an unallocated claim.
 - **Trainer worker fails on first CUDA batch with snapshot errors**: check the
-  trainer worker pod logs, the `open-rl-accel-timeslicer` DaemonSet logs, and the
-  llm-d snapshot-agent logs. The worker should connect to
-  `OPEN_RL_ACCEL_TIMESLICER_HOST:OPEN_RL_ACCEL_TIMESLICER_PORT`, the OpenRL
-  DaemonSet should reach llm-d at `127.0.0.1:9001`, and the worker pod should
-  carry a role-prefixed `timeslice.io/job-id` such as
-  `trainer-<model-id>` or `sampler-<model-id>`.
+  trainer worker pod logs, the llm-d snapshot-agent logs, and the llm-d
+  TimeSlice Orchestrator logs. The worker should reach the orchestrator at
+  `OPEN_RL_TIME_SLICE_ORCH_ADDR`, register with the snapshot agent at
+  `NODE_IP:9001`, and the worker pod should carry a role-prefixed
+  `timeslice.io/job-id` such as `trainer-<model-id>` or `sampler-<model-id>`.
 - **`create_model` future fails with a pod-create error**: check gateway logs and
   RBAC; the error message is propagated into the `RequestFailedResponse`.
 - **First request after `create_model` is slow**: pod scheduling, image pull, and

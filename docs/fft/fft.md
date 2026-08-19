@@ -73,15 +73,15 @@ graph TD
 
     subgraph Cluster ["GKE Regional Standard Cluster"]
         subgraph Node1 ["Physical GPU Machine (dra-2x: Dual NVIDIA GPUs)<br/>DRA Group: trainers"]
-            TS_Daemon["open-rl-accel-timeslicer DaemonSet<br/>(tcp://status.hostIP:9753)"]:::daemon
+            TS_Daemon["llm-d snapshot-agent DaemonSet<br/>(grpc://NODE_IP:9001)"]:::daemon
             TrA["Trainer Pod: job-a<br/>Limits: 80GiB RAM / Claim: trainer-gpu"]:::podA
             TrB["Trainer Pod: job-b<br/>Limits: 80GiB RAM / Claim: trainer-gpu"]:::podB
-            TrA <-->|ACQUIRE / RELEASE| TS_Daemon
-            TrB <-->|ACQUIRE / RELEASE| TS_Daemon
+            TrA <-->|app_channel snapshot/restore| TS_Daemon
+            TrB <-->|app_channel snapshot/restore| TS_Daemon
         end
 
         subgraph Node2 ["Physical GPU Machine (dra-2x: Dual NVIDIA GPUs)<br/>DRA Group: samplers"]
-            SM_Daemon["open-rl-accel-timeslicer DaemonSet<br/>(tcp://status.hostIP:9753)"]:::daemon
+            SM_Daemon["llm-d snapshot-agent DaemonSet<br/>(grpc://NODE_IP:9001)"]:::daemon
             SmA["vLLM Sampler Pod: job-a<br/>Limits: 32GiB RAM / Claim: sampler-gpu"]:::podA
             SmB["vLLM Sampler Pod: job-b<br/>Limits: 32GiB RAM / Claim: sampler-gpu"]:::podB
             SmA <-->|Cooperative Sleep / Yield| SM_Daemon
@@ -154,13 +154,11 @@ To prevent multi-tenant head-of-line blocking, Open-RL replaces FIFO request pro
 ### D. Metadata Store (`RequestStore` / Redis Backend)
 In addition to task queuing, Open-RL utilizes a centralized Metadata Store to maintain session definitions, tenant identifiers, active worker-provisioning status, and asynchronous request/response execution payloads. Today, Redis serves a dual architectural role—backing both the `MultiTenant WorkQueue` and the `Metadata Store`. Abstracting the Metadata Store as a distinct architectural component allows future scalability, enabling structured metadata persistence in relational databases (e.g., PostgreSQL) or distributed key-value stores while keeping high-throughput execution queuing in Redis.
 
-### E. Accelerator Time-Slicer DaemonSet (`open-rl-accel-timeslicer`)
-Running as a `hostNetwork: true` DaemonSet across GPU nodes, the time-slicer serializes CUDA execution within workload groups (`trainers` vs. `samplers`) by coordinating application-level memory offloading with external process snapshotting.
-* **Configurable Queue Scheduling Policy (`--scheduling-policy fifo|lrs`):** When multiple tenant workloads compete for a GPU lock on the same node, the time-slicer supports two distinct queueing algorithms:
-  * **`fifo` (First-In, First-Out):** Serves waiting workloads in strict order of arrival (`deque.popleft()`). While simple, when concurrent jobs start simultaneously, FIFO can trap workloads into rigid, sequential lockstep platoons (`1 -> 2 -> 3 -> 1 -> 2 -> 3`), causing one GPU node to sit 100% idle while workloads bunch up on the opposite node.
-  * **`lrs` (Least Recently Served, Recommended Default):** Tracks the wall-clock release timestamp (`last_release_time[job_id]`) of each workload and prioritizes whichever waiting job released the GPU *least recently* ($\min(\text{last\_release\_time})$). By serving the job that has been away from this GPU longest, LRS acts as an automatic phase-balancing spring that breaks lockstep platoons and maintains continuous hardware overlap across physical nodes.
-* **Cooperative Sleep & Snapshotting:** When a worker yields its time slice (`RELEASE(workload)`), it first performs an application-level sleep to offload active GPU memory to system CPU RAM. Once offloaded, the daemon invokes its `llm-d` backend (`LlmDCheckpointRestorer`) to checkpoint residual VRAM pages and freeze the execution context.
-* **Restore & Wakeup:** When a workload is granted GPU access (`ACQUIRE(workload)`), `llm-d` restores the process context on the accelerator. The worker then executes an application-level wakeup to reload its model weights and optimizer states back into GPU VRAM before resuming execution.
+### E. Time-Slicing Coordination (llm-d platform, `llmd-app` mode)
+OpenRL delegates GPU time-slicing to the llm-d platform (workers default to `OPEN_RL_TIME_SLICE_MODE=llmd-app`; the internal accel-timeslicer daemon has been removed). The cluster-scoped TimeSlice Orchestrator serializes CUDA execution within workload groups (`trainers` vs. `samplers`) with one FIFO lock queue per group, and the node-local llm-d Snapshot Agent owns suspend/resume mechanics.
+* **app_channel Registration:** Workers register once at startup with the Snapshot Agent on their node: trainers hand over their pinned-buffer `sleep()`/`wake_up()` callbacks (`supported_modes=["offload"]`), samplers hand over the vLLM engine object. The agent pushes snapshot/restore commands over the stream when the orchestrator swaps jobs.
+* **Deferred Snapshotting:** `release()` returns immediately; the job's context is snapshotted only when another job actually acquires the group lock. A sole tenant therefore runs with zero snapshot overhead, and `acquire()` returns only after the platform has restored the context (`context_restored` reports which path was taken).
+* **Single-Tenant Escape Hatch:** `OPEN_RL_TIME_SLICE_MODE=off` disables coordination entirely; workers self-manage offload inline around each GPU work unit.
 
 ### F. FFT PyTorch Trainer Worker (`fft_trainer_worker.py`)
 The trainer executes PyTorch FSDP policy gradient optimization and coordinates directly with the time-slicer during context handoffs:
@@ -265,7 +263,7 @@ Rather than attaching rigid, static `nvidia.com/gpu` integer device requests dir
 2. **Intelligent Node Pool Mapping:** When `KubernetesFFTWorkerManager` dynamically provisions a worker pod for a given workload profile, it binds the appropriate DRA claim to the pod specification:
    * **Small Models (<1B):** The worker manager attaches claims requesting a single accelerator (`count: 1`), allowing the Kubernetes DRA scheduler to place worker pods onto cost-effective, single-GPU node pools (`g2-standard-4`).
    * **Larger Multi-GPU Models (4B+):** The worker manager attaches multi-device claims requesting exact device bundles (`count: 2` or `4`). The DRA scheduler evaluates cluster topologies and intelligently routes these pods exclusively onto high-capacity multi-GPU node pools (`g2-standard-24` / `dra-2x`).
-3. **Co-Location & Time-Slicer Binding:** Because DRA resource claims guarantee physical device co-location, trainer and sampler pods assigned to the same claim group automatically land on hardware managed by the corresponding node-local `open-rl-accel-timeslicer` daemon, ensuring synchronized hardware access without manual node labeling.
+3. **Co-Location & Snapshot-Agent Binding:** Because DRA resource claims guarantee physical device co-location, trainer and sampler pods assigned to the same claim group automatically land on hardware served by the same node-local llm-d snapshot agent, ensuring synchronized hardware access without manual node labeling.
 
 ---
 
@@ -282,7 +280,7 @@ The following environment variables govern multi-tenant GPU execution across Gat
 | `CUDA_VISIBLE_DEVICES=<ids>` | Trainer Worker | Binds PyTorch FSDP autograd engines to designated physical accelerator UUIDs or indices. |
 | `SAMPLER_CUDA_VISIBLE_DEVICES=<ids>` | Sampler Worker | Binds vLLM Dynamo engines to isolated inference accelerators. |
 | `VLLM_GPU_MEMORY_UTILIZATION=0.70` | Sampler Worker | Configures vLLM pre-allocated KV cache ceiling, leaving headroom for cooperative memory swapping. |
-| `OPEN_RL_ACCEL_TIMESLICER_HOST` | Workers | Target IP (`status.hostIP`) of the node-local time-slicer daemon controlling hardware locks. |
+| `NODE_IP` | Workers | Node IP (`status.hostIP`); FFT workers register with the node-local llm-d Snapshot Agent at `NODE_IP:9001` for suspend/resume. |
 
 ### Reference E2E Invocation Commands
 To execute single-job FFT RL benchmark verification:
@@ -340,7 +338,7 @@ open-rl-trainer-job-b   1/1   Running   0 restarts   (Completed 10 steps)
 | **Weight Saving (`time/save_checkpoint`)** | `76.1 s` – `162.9 s` | **`74.1 s` – `87.5 s`** | `179.1 s` | Reflects shared NFS disk write speeds (`~145–176 s/it`) |
 | **Total Iteration Time (`time/total`)** | `509.6 s` – `740.3 s` | **`123.6 s` – `137.5 s`** | `228.8 s` | Consistent throughput at **~2.1 minutes / step** |
 
-### Context Switching Speeds (`open-rl-accel-timeslicer`)
+### Context Switching Speeds (time-slicing context handoff)
 * **vLLM Samplers:** Snapshot (Freeze to RAM) = **`2.00 s`** | Restore (Reload to VRAM) = **`1.00 s`**
 * **PyTorch Trainers:** Snapshot (Freeze to RAM) = **`4.01 s`** | Restore (Reload to VRAM) = **`1.00 s` – `3.00 s`**
 

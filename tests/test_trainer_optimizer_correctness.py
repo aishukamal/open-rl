@@ -51,6 +51,9 @@ def _load_training_requests_processor_module():
   env = {
     "OPEN_RL_ENABLE_FFT": "true",
     "REDIS_URL": "redis://localhost:6379",
+    # Unit tests exercise the self-managed offload path; llmd-app (the
+    # default) would try to register with a real Snapshot Agent.
+    "OPEN_RL_TIME_SLICE_MODE": "off",
   }
   with patch.dict(sys.modules, stubs), patch.dict(os.environ, env):
     for module_name in list(sys.modules):
@@ -389,7 +392,7 @@ class TestTrainingRequestsProcessorFullMode(unittest.IsolatedAsyncioTestCase):
     store = _FutureStoreStub()
     time_slicer = _TimeSlicerStub()
 
-    with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379"}):
+    with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379", "OPEN_RL_TIME_SLICE_MODE": "off"}):
       processor = training_requests_processor_module.FFTTrainingRequestsProcessor(store, worker, "model-a", time_slicer=time_slicer)
       await processor.process_request(
         {
@@ -420,7 +423,7 @@ class TestTrainingRequestsProcessorFullMode(unittest.IsolatedAsyncioTestCase):
     store = _FutureStoreStub()
     time_slicer = _TimeSlicerStub()
 
-    with patch.dict(os.environ, {"OPEN_RL_TMP_DIR": "/tmp/open-rl-test", "REDIS_URL": "redis://localhost:6379"}):
+    with patch.dict(os.environ, {"OPEN_RL_TMP_DIR": "/tmp/open-rl-test", "REDIS_URL": "redis://localhost:6379", "OPEN_RL_TIME_SLICE_MODE": "off"}):
       processor = training_requests_processor_module.FFTTrainingRequestsProcessor(store, worker, "model-a", time_slicer=time_slicer)
       await processor.process_request(
         {
@@ -462,6 +465,7 @@ class TestTrainingRequestsProcessorFullMode(unittest.IsolatedAsyncioTestCase):
         {
           "OPEN_RL_ENABLE_FFT": "true",
           "REDIS_URL": "redis://localhost:6379",
+          "OPEN_RL_TIME_SLICE_MODE": "off",
         },
         clear=True,
       ),
@@ -498,6 +502,7 @@ class TestTrainingRequestsProcessorFullMode(unittest.IsolatedAsyncioTestCase):
         {
           "OPEN_RL_ENABLE_FFT": "true",
           "REDIS_URL": "redis://localhost:6379",
+          "OPEN_RL_TIME_SLICE_MODE": "off",
         },
       ),
       patch.object(training_requests_processor_module, "get_store", return_value=store),
@@ -534,7 +539,7 @@ class TestTrainingRequestsProcessorFullMode(unittest.IsolatedAsyncioTestCase):
     )
     time_slicer = _TimeSlicerStub(events=events)
 
-    with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379"}):
+    with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379", "OPEN_RL_TIME_SLICE_MODE": "off"}):
       processor = training_requests_processor_module.FFTTrainingRequestsProcessor(store, worker, "model-a", time_slicer=time_slicer)
       await processor.run_once()
 

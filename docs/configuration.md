@@ -72,16 +72,16 @@ make server BASE_MODEL=google/gemma-4-e2b SAMPLING_BACKEND=vllm
 | Env var | Default | What it does |
 | --- | --- | --- |
 | `OPEN_RL_WORKER_MANAGER` | `local` | Trainer worker manager mode. Use `local` for subprocess workers or `kubernetes` for the DRA worker-manager deployment. |
-| `OPEN_RL_ACCEL_TIMESLICER_SOCKET` | `/tmp/open-rl/accel-timeslicer.sock` | Unix socket path for a local accelerator time-slicer. Used when `OPEN_RL_ACCEL_TIMESLICER_HOST` is unset. |
-| `OPEN_RL_ACCEL_TIMESLICER_HOST` | unset | Node-local accelerator time-slicer host for Kubernetes workers. When set, the worker uses TCP instead of the Unix socket; Kubernetes sets this from `status.hostIP`. |
-| `OPEN_RL_ACCEL_TIMESLICER_PORT` | `9753` | Node-local accelerator time-slicer TCP port for Kubernetes workers. |
+| `OPEN_RL_TIME_SLICE_MODE` | `llmd-app` | Time-slicing coordination mode for FFT workers. `llmd-app` delegates to the llm-d time-slicing platform (TimeSlice Orchestrator + node-local Snapshot Agent); `off` disables coordination for single-tenant deployments and workers self-manage offload. |
+| `OPEN_RL_TIME_SLICE_ORCH_ADDR` | `timeslice-timesliceorchestrator.timeslice-system.svc.cluster.local:50051` | llm-d TimeSlice Orchestrator gRPC target. |
+| `OPEN_RL_SNAPSHOT_AGENT_ADDR` | unset | Node-local llm-d Snapshot Agent gRPC target. Falls back to `LLMD_SNAPSHOT_AGENT_ENDPOINT`, then `NODE_IP:9001` (Kubernetes sets `NODE_IP` from `status.hostIP`). |
+| `OPEN_RL_TIME_SLICE_ACQUIRE_TIMEOUT_SEC` | unset | Optional timeout for orchestrator acquire RPCs. |
 
-For local FFT subprocess mode, start `python -m accel_timeslicer.serve` before the
-workers run. The local launcher tags each worker with a time-slice job id and
-starts it in its own process group so the CUDA checkpoint backend can discover
-the active GPU PIDs. Kubernetes deploys the equivalent process with the
-`open-rl-accel-timeslicer` DaemonSet, which layers on top of the llm-d snapshot
-backend by default for physical checkpoint/restore.
+FFT time-slicing requires the llm-d time-slicing platform (its orchestrator
+and per-node snapshot agents) on the cluster. OpenRL's internal
+accel-timeslicer daemon has been removed; for local single-tenant FFT runs set
+`OPEN_RL_TIME_SLICE_MODE=off` and workers offload themselves around each GPU
+work unit.
 
 ## vLLM variables
 

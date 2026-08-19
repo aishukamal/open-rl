@@ -39,12 +39,12 @@ data:
           value: "/mnt/shared/open-rl"
         - name: HF_HOME
           value: "/mnt/shared/open-rl/huggingface"
-        - name: OPEN_RL_ACCEL_TIMESLICER_HOST
+        # llmd-app mode: workers reach the node-local llm-d Snapshot Agent at
+        # NODE_IP:9001 (see accel_timeslicer/llmd_app.py snapshot_agent_addr).
+        - name: NODE_IP
           valueFrom:
             fieldRef:
               fieldPath: status.hostIP
-        - name: OPEN_RL_ACCEL_TIMESLICER_PORT
-          value: "9753"
         resources:
           claims:
           - name: sampler-gpu

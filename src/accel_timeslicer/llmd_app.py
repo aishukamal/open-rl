@@ -1,15 +1,16 @@
-# llm-d time-slicing platform integration ("llmd-app" mode).
+# llm-d time-slicing platform integration ("llmd-app" mode, the default).
 #
-# In this mode OpenRL stops running its own accel-timeslicer daemonset and
-# instead delegates coordination to the llm-d TimeSlice Orchestrator
-# (cluster-scoped lock queues, one per time-slice group) and delegates
-# suspend/resume mechanics to the node-local llm-d Snapshot Agent via the
-# app_channel backend: workers register once at startup with
-# timeslice.snapshot_agent.register_workload and the agent PUSHES
-# snapshot/restore commands over the stream when the orchestrator swaps jobs.
+# OpenRL does not run a time-slicing coordinator of its own: it delegates
+# coordination to the llm-d TimeSlice Orchestrator (cluster-scoped lock
+# queues, one per time-slice group) and delegates suspend/resume mechanics to
+# the node-local llm-d Snapshot Agent via the app_channel backend: workers
+# register once at startup with timeslice.snapshot_agent.register_workload and
+# the agent PUSHES snapshot/restore commands over the stream when the
+# orchestrator swaps jobs.
 #
 # Mode selection and addressing are environment driven:
-#   OPEN_RL_TIME_SLICE_MODE       "llmd-app" enables this mode (default: legacy)
+#   OPEN_RL_TIME_SLICE_MODE       "llmd-app" (default) or "off" (single-tenant,
+#                                 no coordination; workers self-manage offload)
 #   OPEN_RL_TIME_SLICE_ORCH_ADDR  TimeSlice Orchestrator gRPC target
 #   OPEN_RL_SNAPSHOT_AGENT_ADDR  node-local Snapshot Agent gRPC target
 #                                (falls back to LLMD_SNAPSHOT_AGENT_ENDPOINT, then NODE_IP:9001)
@@ -33,7 +34,7 @@ DEFAULT_SNAPSHOT_AGENT_PORT = 9001
 
 
 def timeslice_mode() -> str:
-  return os.getenv("OPEN_RL_TIME_SLICE_MODE", "legacy").strip().lower()
+  return os.getenv("OPEN_RL_TIME_SLICE_MODE", LLMD_APP_MODE).strip().lower()
 
 
 def is_llmd_app_mode() -> bool:
@@ -98,7 +99,7 @@ def register_app_channel_workload(
 class OrchestratorTimeSlicerClient:
   """TimeSlicerClient-compatible adapter over the llm-d TimeSlice Orchestrator.
 
-  Semantics differ from the legacy accel-timeslicer:
+  Semantics, compared with self-managed offload (mode "off"):
   - acquire() blocks until the group lock is granted; if this job's context
     was snapshotted, the orchestrator restores it (via the Snapshot Agents on
     the group's nodes) BEFORE the call returns. The yielded AcquireResult

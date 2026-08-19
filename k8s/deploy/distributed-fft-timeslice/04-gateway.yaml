@@ -71,7 +71,10 @@ spec:
         - name: OPEN_RL_WORKER_POD_TEMPLATE
           value: "/etc/open-rl/trainer/trainer-worker-pod.yaml"
         - name: OPEN_RL_WORKER_IMAGE
-          value: "ghcr.io/gke-labs/open-rl/server:latest"
+          valueFrom:
+            configMapKeyRef:
+              name: open-rl-config
+              key: OPEN_RL_WORKER_IMAGE
         resources:
           limits:
             memory: "2Gi"

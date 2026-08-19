@@ -10,7 +10,6 @@ resources:
   - 03-rbac.yaml
   - 04-gateway.yaml
   - 05-worker-pod-template.yaml
-  - 07-accel-timeslicer-daemonset.yaml
   - 09-sampler-pod-template.yaml
   - 10-dcgm-monitoring.yaml
 
@@ -25,6 +24,10 @@ configMapGenerator:
       - OPEN_RL_WEIGHT_SYNC_STRATEGY="delta"
       - OPEN_RL_WEIGHT_SYNC_DELTA_FORMAT="vllm_fused"
       - OPEN_RL_WEIGHT_SYNC_DELTA_APPLY_METHOD="patch_in_place"
+      # Image the gateway stamps onto dynamically launched worker pods (the
+      # gateway reads it via configMapKeyRef); keep in step with the images
+      # override below.
+      - OPEN_RL_WORKER_IMAGE="gcr.io/cdrollouts-sunilarora/open-rl-server:0.6.18"
 
 images:
   - name: ghcr.io/gke-labs/open-rl/server
@@ -33,15 +36,3 @@ images:
   - name: ghcr.io/gke-labs/open-rl/gateway
     newName: gcr.io/cdrollouts-sunilarora/open-rl-gateway
     newTag: 0.6.18
-
-replacements:
-  - source:
-      kind: DaemonSet
-      name: open-rl-accel-timeslicer
-      fieldPath: spec.template.spec.containers.[name=accel-timeslicer].image
-    targets:
-      - select:
-          kind: Deployment
-          name: open-rl-gateway
-        fieldPaths:
-          - spec.template.spec.containers.[name=gateway].env.[name=OPEN_RL_WORKER_IMAGE].value
